@@ -108,6 +108,7 @@ import {
   FolderTiles,
   MoveToFolderDialog,
   SkillFolderRail,
+  skillFolderDisplayPath,
   subtreeFolderIds,
   treeFromResult,
 } from "../components/folders/SkillFolderTree";
@@ -2703,6 +2704,7 @@ function SkillTagsEditor({
 
 export function SkillDetailPage({
   detail,
+  folderDisplayPath,
   catalogSource,
   routeSkills,
   loading,
@@ -2744,6 +2746,7 @@ export function SkillDetailPage({
   studioHref,
 }: {
   detail: CompanySkillDetail | null | undefined;
+  folderDisplayPath?: string | null;
   catalogSource?: CatalogSkillSource | null;
   routeSkills?: CompanySkillRouteSubject[];
   loading: boolean;
@@ -3275,7 +3278,7 @@ export function SkillDetailPage({
         </main>
 
         <aside className="min-w-0 space-y-6 border-t border-border pt-4 xl:border-l xl:border-t-0 xl:pl-5 xl:pt-0">
-          <SkillLocationCard folderPath={detail.folderPath} onMove={onMoveToFolder} />
+          <SkillLocationCard folderPath={folderDisplayPath ?? detail.folderPath} onMove={onMoveToFolder} />
           <SkillTagsEditor
             categories={detail.categories}
             pending={updateSettingsPending}
@@ -4878,6 +4881,10 @@ export function CompanySkills() {
       }),
     };
   }, [skillFolderResult, discoveryTab, discoveryTabCards, discoveryCategory, discoverySearch]);
+  const activeSkillFolderDisplayPath = useMemo(
+    () => skillFolderDisplayPath(treeFromResult(skillFolderResult), activeDetail?.folderId),
+    [skillFolderResult, activeDetail?.folderId],
+  );
 
   if (!selectedCompanyId) {
     return <EmptyState icon={Boxes} message="Select a company to manage skills." />;
@@ -5258,6 +5265,7 @@ export function CompanySkills() {
       ) : activeView === "installed" && selectedSkillId ? (
         <SkillDetailPage
           detail={activeDetail}
+          folderDisplayPath={activeSkillFolderDisplayPath}
           catalogSource={catalogSourceForDetail}
           routeSkills={installedSkills}
           loading={skillsQuery.isLoading || detailQuery.isLoading}
