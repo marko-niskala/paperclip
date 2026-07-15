@@ -4,7 +4,17 @@ import path from "node:path";
 import { promises as fs } from "node:fs";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
-import { agents, authUsers, companies, companySkillVersions, companySkills, createDb, folders } from "@paperclipai/db";
+import {
+  agents,
+  authUsers,
+  companies,
+  companySkillVersions,
+  companySkills,
+  createDb,
+  folders,
+  projects,
+  projectWorkspaces,
+} from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -54,6 +64,8 @@ describeEmbeddedPostgres("companySkillService.list", () => {
     await db.delete(agents);
     await db.delete(companySkills);
     await db.delete(folders);
+    await db.delete(projectWorkspaces);
+    await db.delete(projects);
     await db.delete(companies);
     await db.delete(authUsers);
     await Promise.all(Array.from(cleanupDirs, (dir) => fs.rm(dir, { recursive: true, force: true })));
@@ -1964,5 +1976,60 @@ describeEmbeddedPostgres("companySkillService.list", () => {
     await svc.updateFile(companyId, skill.id, "SKILL.md", editedMarkdown, { type: "user", userId: "board" });
     versions = await svc.listVersions(companyId, skill.id);
     expect(versions).toHaveLength(2);
+  });
+
+  it("files new project imports without moving them back on re-import", async () => {
+    const companyId = randomUUID();
+    const projectId = randomUUID();
+    const workspaceId = randomUUID();
+    const folderSvc = folderService(db);
+    const workspaceDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-skill-project-folder-"));
+    cleanupDirs.add(workspaceDir);
+    const skillDir = path.join(workspaceDir, "skills", "project-skill");
+    const skillFile = path.join(skillDir, "SKILL.md");
+    await fs.mkdir(skillDir, { recursive: true });
+    await fs.writeFile(skillFile, "---\nname: Project Skill\n---\n\nInitial content.\n", "utf8");
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(projects).values({ id: projectId, companyId, name: "Skills Project" });
+    await db.insert(projectWorkspaces).values({
+      id: workspaceId,
+      companyId,
+      projectId,
+      name: "Primary",
+      cwd: workspaceDir,
+      isPrimary: true,
+    });
+
+    const firstImport = await svc.scanProjectWorkspaces(companyId, { projectIds: [projectId] });
+
+    expect(firstImport.imported).toHaveLength(1);
+    const importedSkill = firstImport.imported[0]!;
+    const projectFolder = await folderSvc.getFolder(companyId, importedSkill.folderId!);
+    expect(projectFolder).toMatchObject({
+      path: "projects/skills-project",
+      systemKey: `project:${projectId}`,
+    });
+
+    const personalFolder = await folderSvc.create(companyId, { kind: "skill", name: "Personal" });
+    await folderSvc.moveItem(companyId, {
+      kind: "skill",
+      itemId: importedSkill.id,
+      folderId: personalFolder.id,
+    });
+    await fs.writeFile(skillFile, "---\nname: Project Skill\n---\n\nUpdated content.\n", "utf8");
+
+    const reimport = await svc.scanProjectWorkspaces(companyId, { projectIds: [projectId] });
+
+    expect(reimport.updated).toHaveLength(1);
+    expect(reimport.updated[0]).toMatchObject({
+      id: importedSkill.id,
+      folderId: personalFolder.id,
+      markdown: expect.stringContaining("Updated content."),
+    });
   });
 });
