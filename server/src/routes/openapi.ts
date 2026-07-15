@@ -49,6 +49,7 @@ import {
   runRoutineSchema,
   // Folders
   createFolderSchema,
+  ensureMySkillFolderSchema,
   folderKindSchema,
   moveFolderItemSchema,
   moveFolderSchema,
@@ -868,6 +869,7 @@ const CREATED_OPERATIONS = new Set([
   "POST /api/projects/{id}/workspaces",
   "POST /api/companies/{companyId}/routines",
   "POST /api/companies/{companyId}/folders",
+  "POST /api/companies/{companyId}/folders/ensure-my",
   "POST /api/routines/{id}/triggers",
   "POST /api/companies/{companyId}/secrets",
   "POST /api/companies/{companyId}/user-secret-definitions",
@@ -5175,6 +5177,14 @@ registerCurrentRoute({
 });
 
 registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/folders/ensure-my",
+  tags: ["folders"],
+  summary: "Ensure the current user's personal skill folder exists",
+  body: ensureMySkillFolderSchema,
+});
+
+registerCurrentRoute({
   method: "patch",
   path: "/api/companies/{companyId}/folders/{folderId}",
   tags: ["folders"],
@@ -5194,7 +5204,7 @@ registerCurrentRoute({
   method: "post",
   path: "/api/companies/{companyId}/folders/{folderId}/move",
   tags: ["folders"],
-  summary: "Reorder a folder",
+  summary: "Move or reorder a folder",
   body: moveFolderSchema,
 });
 
