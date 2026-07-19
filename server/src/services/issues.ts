@@ -5777,7 +5777,7 @@ export function issueService(db: Db) {
       const {
         acceptanceCriteria,
         blockParentUntilDone,
-        executionWorkspaceInheritanceMode = "linkage",
+        executionWorkspaceInheritanceMode = "strategy_only",
         actorAgentId,
         actorUserId,
         ...issueData
@@ -5795,7 +5795,11 @@ export function issueService(db: Db) {
         ...issueData,
         parentId: parent.id,
         projectId: issueData.projectId ?? parent.projectId,
-        projectWorkspaceId: issueData.projectWorkspaceId ?? (inheritStrategyOnly ? parent.projectWorkspaceId : undefined),
+        projectWorkspaceId: issueData.projectWorkspaceId ?? (
+          (issueData.projectId ?? parent.projectId) === parent.projectId
+            ? parent.projectWorkspaceId
+            : undefined
+        ),
         goalId: issueData.goalId ?? parent.goalId,
         actorResponsibleUserId: issueData.actorResponsibleUserId ?? null,
         trustExplicitResponsibleUserId: issueData.trustExplicitResponsibleUserId === true,
@@ -6216,43 +6220,90 @@ export function issueService(db: Db) {
         let executionWorkspacePreference = issueData.executionWorkspacePreference ?? null;
         let executionWorkspaceSettings =
           (issueData.executionWorkspaceSettings as Record<string, unknown> | null | undefined) ?? null;
-        const workspaceInheritanceIssueId = skipExecutionWorkspaceInheritance
-          ? null
-          : inheritExecutionWorkspaceFromIssueId ?? issueData.parentId ?? null;
-        const hasExplicitExecutionWorkspaceOverride =
-          issueData.executionWorkspaceId !== undefined ||
-          issueData.executionWorkspacePreference !== undefined ||
-          issueData.executionWorkspaceSettings !== undefined;
-        if (workspaceInheritanceIssueId) {
-          const workspaceSource = await getWorkspaceInheritanceIssue(tx, companyId, workspaceInheritanceIssueId);
+        if (!skipExecutionWorkspaceInheritance && issueData.parentId) {
+          const parentContext = await getWorkspaceInheritanceIssue(tx, companyId, issueData.parentId);
+          if (issueData.projectId == null && parentContext.projectId) {
+            issueData.projectId = parentContext.projectId;
+          }
+          if (
+            projectWorkspaceId == null &&
+            parentContext.projectWorkspaceId &&
+            issueData.projectId === parentContext.projectId
+          ) {
+            projectWorkspaceId = parentContext.projectWorkspaceId;
+          }
+        }
+        if (!skipExecutionWorkspaceInheritance && inheritExecutionWorkspaceFromIssueId) {
+          const workspaceSource = await getWorkspaceInheritanceIssue(
+            tx,
+            companyId,
+            inheritExecutionWorkspaceFromIssueId,
+          );
+          if (!workspaceSource.executionWorkspaceId) {
+            throw unprocessable("Workspace inheritance issue does not own an execution workspace");
+          }
+          if (issueData.projectId && workspaceSource.projectId !== issueData.projectId) {
+            throw unprocessable("Workspace inheritance issue must belong to the selected project");
+          }
           if (issueData.projectId == null && workspaceSource.projectId) {
             issueData.projectId = workspaceSource.projectId;
+          }
+          if (projectWorkspaceId && workspaceSource.projectWorkspaceId !== projectWorkspaceId) {
+            throw unprocessable("Workspace inheritance issue must belong to the selected project workspace");
           }
           if (projectWorkspaceId == null && workspaceSource.projectWorkspaceId) {
             projectWorkspaceId = workspaceSource.projectWorkspaceId;
           }
           if (
-            isolatedWorkspacesEnabled &&
-            !hasExplicitExecutionWorkspaceOverride &&
-            workspaceSource.executionWorkspaceId
+            issueData.executionWorkspaceId !== undefined &&
+            issueData.executionWorkspaceId !== workspaceSource.executionWorkspaceId
           ) {
-            const sourceWorkspace = await tx
-              .select({
-                id: executionWorkspaces.id,
-                mode: executionWorkspaces.mode,
-              })
-              .from(executionWorkspaces)
-              .where(eq(executionWorkspaces.id, workspaceSource.executionWorkspaceId))
-              .then((rows) => rows[0] ?? null);
-            if (sourceWorkspace) {
-              executionWorkspaceId = sourceWorkspace.id;
-              executionWorkspacePreference = "reuse_existing";
-              executionWorkspaceSettings = {
-                ...((workspaceSource.executionWorkspaceSettings as Record<string, unknown> | null | undefined) ?? {}),
-                mode: issueExecutionWorkspaceModeForPersistedWorkspace(sourceWorkspace.mode),
-              };
-            }
+            throw unprocessable("Execution workspace must be owned by the workspace inheritance issue");
           }
+
+          const sourceWorkspace = await tx
+            .select({
+              id: executionWorkspaces.id,
+              companyId: executionWorkspaces.companyId,
+              projectId: executionWorkspaces.projectId,
+              projectWorkspaceId: executionWorkspaces.projectWorkspaceId,
+              sourceIssueId: executionWorkspaces.sourceIssueId,
+              mode: executionWorkspaces.mode,
+              status: executionWorkspaces.status,
+              closedAt: executionWorkspaces.closedAt,
+            })
+            .from(executionWorkspaces)
+            .where(eq(executionWorkspaces.id, workspaceSource.executionWorkspaceId))
+            .then((rows) => rows[0] ?? null);
+          if (!sourceWorkspace) throw notFound("Execution workspace not found");
+          if (sourceWorkspace.companyId !== companyId) {
+            throw unprocessable("Execution workspace must belong to same company");
+          }
+          if (sourceWorkspace.sourceIssueId !== workspaceSource.id) {
+            throw unprocessable("Execution workspace must be owned by the workspace inheritance issue");
+          }
+          if (
+            sourceWorkspace.closedAt != null ||
+            !["active", "idle", "in_review"].includes(sourceWorkspace.status) ||
+            !["isolated_workspace", "operator_branch", "adapter_managed", "cloud_sandbox"].includes(sourceWorkspace.mode)
+          ) {
+            throw unprocessable("Execution workspace is not reusable");
+          }
+          if (issueData.projectId && sourceWorkspace.projectId !== issueData.projectId) {
+            throw unprocessable("Execution workspace must belong to the selected project");
+          }
+          if (projectWorkspaceId && sourceWorkspace.projectWorkspaceId !== projectWorkspaceId) {
+            throw unprocessable("Execution workspace must belong to the selected project workspace");
+          }
+
+          executionWorkspaceId = sourceWorkspace.id;
+          executionWorkspacePreference = issueData.executionWorkspacePreference ?? "reuse_existing";
+          executionWorkspaceSettings = issueData.executionWorkspaceSettings === undefined
+            ? {
+              ...((workspaceSource.executionWorkspaceSettings as Record<string, unknown> | null | undefined) ?? {}),
+              mode: issueExecutionWorkspaceModeForPersistedWorkspace(sourceWorkspace.mode),
+            }
+            : (issueData.executionWorkspaceSettings as Record<string, unknown> | null);
         }
         if (issueData.projectId == null && projectWorkspaceId) {
           const workspace = await assertValidProjectWorkspace(companyId, null, projectWorkspaceId, tx);

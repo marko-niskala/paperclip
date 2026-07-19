@@ -2650,7 +2650,9 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           input.latestRun?.id ?? "no-run",
         ].join(":"),
         billingCode: input.issue.billingCode,
-        inheritExecutionWorkspaceFromIssueId: input.issue.id,
+        ...(input.issue.executionWorkspaceId
+          ? { inheritExecutionWorkspaceFromIssueId: input.issue.id }
+          : {}),
       });
     } catch (error) {
       if (!isUniqueStrandedIssueRecoveryConflict(error)) throw error;

@@ -2308,7 +2308,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     await tempDb?.cleanup();
   });
 
-  it("inherits the parent issue workspace linkage when child workspace fields are omitted", async () => {
+  it("inherits the parent issue workspace linkage when explicitly requested", async () => {
     const companyId = randomUUID();
     const projectId = randomUUID();
     const parentIssueId = randomUUID();
@@ -2367,11 +2367,16 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
         workspaceRuntime: { profile: "agent" },
       },
     });
+    await db
+      .update(executionWorkspaces)
+      .set({ sourceIssueId: parentIssueId })
+      .where(eq(executionWorkspaces.id, executionWorkspaceId));
 
     const child = await svc.create(companyId, {
       parentId: parentIssueId,
       projectId,
       title: "Child issue",
+      inheritExecutionWorkspaceFromIssueId: parentIssueId,
     });
 
     expect(child.parentId).toBe(parentIssueId);
@@ -2973,6 +2978,10 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
         mode: "operator_branch",
       },
     });
+    await db
+      .update(executionWorkspaces)
+      .set({ sourceIssueId })
+      .where(eq(executionWorkspaces.id, executionWorkspaceId));
 
     const followUp = await svc.create(companyId, {
       projectId,
@@ -2989,7 +2998,121 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     });
   });
 
-  it("createChild applies parent defaults, acceptance criteria, workspace inheritance, and optional parent blocker chaining", async () => {
+  it("rejects explicit workspace inheritance from a foreign, mismatched, or unusable workspace", async () => {
+    const companyId = randomUUID();
+    const otherCompanyId = randomUUID();
+    const projectId = randomUUID();
+    const otherProjectId = randomUUID();
+    const sourceIssueId = randomUUID();
+    const workspaceOwnerIssueId = randomUUID();
+    const otherCompanyIssueId = randomUUID();
+    const projectWorkspaceId = randomUUID();
+    const alternateProjectWorkspaceId = randomUUID();
+    const executionWorkspaceId = randomUUID();
+
+    await db.insert(companies).values([
+      {
+        id: companyId,
+        name: "Paperclip",
+        issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+      },
+      {
+        id: otherCompanyId,
+        name: "Other company",
+        issuePrefix: `T${otherCompanyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+      },
+    ]);
+    await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: true });
+    await db.insert(projects).values([
+      { id: projectId, companyId, name: "Source project", status: "in_progress" },
+      { id: otherProjectId, companyId, name: "Other project", status: "in_progress" },
+    ]);
+    await db.insert(projectWorkspaces).values([
+      { id: projectWorkspaceId, companyId, projectId, name: "Primary workspace" },
+      { id: alternateProjectWorkspaceId, companyId, projectId, name: "Alternate workspace" },
+    ]);
+    await db.insert(executionWorkspaces).values({
+      id: executionWorkspaceId,
+      companyId,
+      projectId,
+      projectWorkspaceId,
+      mode: "operator_branch",
+      strategyType: "git_worktree",
+      name: "Operator branch",
+      status: "active",
+      providerType: "git_worktree",
+    });
+    await db.insert(issues).values([
+      {
+        id: sourceIssueId,
+        companyId,
+        projectId,
+        projectWorkspaceId,
+        title: "Named source issue",
+        status: "todo",
+        priority: "medium",
+        executionWorkspaceId,
+      },
+      {
+        id: workspaceOwnerIssueId,
+        companyId,
+        projectId,
+        projectWorkspaceId,
+        title: "Actual workspace owner",
+        status: "todo",
+        priority: "medium",
+      },
+      {
+        id: otherCompanyIssueId,
+        companyId: otherCompanyId,
+        title: "Foreign company source",
+        status: "todo",
+        priority: "medium",
+      },
+    ]);
+    await db
+      .update(executionWorkspaces)
+      .set({ sourceIssueId: workspaceOwnerIssueId })
+      .where(eq(executionWorkspaces.id, executionWorkspaceId));
+
+    await expect(svc.create(companyId, {
+      title: "Wrong owner continuation",
+      inheritExecutionWorkspaceFromIssueId: sourceIssueId,
+    })).rejects.toMatchObject({ status: 422 });
+
+    await db
+      .update(executionWorkspaces)
+      .set({ sourceIssueId, status: "archived", closedAt: new Date() })
+      .where(eq(executionWorkspaces.id, executionWorkspaceId));
+    await expect(svc.create(companyId, {
+      title: "Closed workspace continuation",
+      inheritExecutionWorkspaceFromIssueId: sourceIssueId,
+    })).rejects.toMatchObject({ status: 422 });
+
+    await db
+      .update(executionWorkspaces)
+      .set({ status: "active", closedAt: null })
+      .where(eq(executionWorkspaces.id, executionWorkspaceId));
+    await expect(svc.create(companyId, {
+      title: "Cross-project continuation",
+      projectId: otherProjectId,
+      inheritExecutionWorkspaceFromIssueId: sourceIssueId,
+    })).rejects.toMatchObject({ status: 422 });
+    await expect(svc.create(companyId, {
+      title: "Incompatible project workspace continuation",
+      projectId,
+      projectWorkspaceId: alternateProjectWorkspaceId,
+      inheritExecutionWorkspaceFromIssueId: sourceIssueId,
+    })).rejects.toMatchObject({ status: 422 });
+    await expect(svc.create(companyId, {
+      title: "Cross-company continuation",
+      inheritExecutionWorkspaceFromIssueId: otherCompanyIssueId,
+    })).rejects.toMatchObject({ status: 404 });
+  });
+
+  it("createChild defaults to fresh workspace intent and supports explicit linkage", async () => {
     const companyId = randomUUID();
     const projectId = randomUUID();
     const goalId = randomUUID();
@@ -3058,12 +3181,16 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
         mode: "isolated_workspace",
       },
     });
+    await db
+      .update(executionWorkspaces)
+      .set({ sourceIssueId: parentIssueId })
+      .where(eq(executionWorkspaces.id, executionWorkspaceId));
 
     const { issue: child, parentBlockerAdded } = await svc.createChild(parentIssueId, {
       title: "Child helper",
       status: "todo",
       description: "Implement the helper.",
-      acceptanceCriteria: ["Uses the parent issue as parentId", "Reuses the parent execution workspace"],
+      acceptanceCriteria: ["Uses the parent issue as parentId", "Realizes a fresh execution workspace"],
       blockParentUntilDone: true,
     });
 
@@ -3075,8 +3202,25 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     expect(child.description).toContain("## Acceptance Criteria");
     expect(child.description).toContain("- Uses the parent issue as parentId");
     expect(child.projectWorkspaceId).toBe(projectWorkspaceId);
-    expect(child.executionWorkspaceId).toBe(executionWorkspaceId);
-    expect(child.executionWorkspacePreference).toBe("reuse_existing");
+    expect(child.executionWorkspaceId).toBeNull();
+    expect(child.executionWorkspacePreference).toBeNull();
+
+    const { issue: nestedChild } = await svc.createChild(child.id, {
+      title: "Nested independent child",
+      status: "todo",
+    });
+    expect(nestedChild.projectId).toBe(projectId);
+    expect(nestedChild.projectWorkspaceId).toBe(projectWorkspaceId);
+    expect(nestedChild.executionWorkspaceId).toBeNull();
+    expect(nestedChild.executionWorkspacePreference).toBeNull();
+
+    const { issue: linkedChild } = await svc.createChild(parentIssueId, {
+      title: "Explicit continuation child",
+      status: "todo",
+      executionWorkspaceInheritanceMode: "linkage",
+    });
+    expect(linkedChild.executionWorkspaceId).toBe(executionWorkspaceId);
+    expect(linkedChild.executionWorkspacePreference).toBe("reuse_existing");
 
     const parentRelations = await svc.getRelationSummaries(parentIssueId);
     expect(parentRelations.blockedBy).toEqual([
@@ -4024,7 +4168,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     await tempDb?.cleanup();
   });
 
-  it("inherits the parent issue workspace linkage when child workspace fields are omitted", async () => {
+  it("inherits the parent issue workspace linkage when explicitly requested", async () => {
     const companyId = randomUUID();
     const projectId = randomUUID();
     const parentIssueId = randomUUID();
@@ -4083,11 +4227,16 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
         workspaceRuntime: { profile: "agent" },
       },
     });
+    await db
+      .update(executionWorkspaces)
+      .set({ sourceIssueId: parentIssueId })
+      .where(eq(executionWorkspaces.id, executionWorkspaceId));
 
     const child = await svc.create(companyId, {
       parentId: parentIssueId,
       projectId,
       title: "Child issue",
+      inheritExecutionWorkspaceFromIssueId: parentIssueId,
     });
 
     expect(child.parentId).toBe(parentIssueId);
@@ -4100,7 +4249,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     });
   });
 
-  it("preserves the parent project when a generic child create inherits workspace linkage", async () => {
+  it("preserves parent project context without inheriting concrete workspace linkage", async () => {
     const companyId = randomUUID();
     const projectId = randomUUID();
     const parentIssueId = randomUUID();
@@ -4165,7 +4314,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     expect(child.parentId).toBe(parentIssueId);
     expect(child.projectId).toBe(projectId);
     expect(child.projectWorkspaceId).toBe(projectWorkspaceId);
-    expect(child.executionWorkspaceId).toBe(executionWorkspaceId);
+    expect(child.executionWorkspaceId).toBeNull();
   });
 
   it("rejects explicitly pinned isolated git worktrees without a project or reusable workspace", async () => {
@@ -4378,6 +4527,10 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
         mode: "operator_branch",
       },
     });
+    await db
+      .update(executionWorkspaces)
+      .set({ sourceIssueId })
+      .where(eq(executionWorkspaces.id, executionWorkspaceId));
 
     const followUp = await svc.create(companyId, {
       title: "Follow-up issue",

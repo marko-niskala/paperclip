@@ -443,6 +443,7 @@ export const createChildIssueSchema = withCreateIssueStatusDefault(createIssueBa
   .extend({
     acceptanceCriteria: z.array(z.string().trim().min(1).max(500)).max(20).optional(),
     blockParentUntilDone: z.boolean().optional().default(false),
+    executionWorkspaceInheritanceMode: z.enum(["linkage", "strategy_only"]).optional().default("strategy_only"),
   }));
 
 export type CreateChildIssue = z.infer<typeof createChildIssueSchema>;
