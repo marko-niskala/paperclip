@@ -1164,7 +1164,7 @@ describe("agent issue mutation checkout ownership", () => {
     expect(mockIssueService.update).not.toHaveBeenCalled();
   });
 
-  it("defaults agent-created root follow-up issues to inherit the current run workspace", async () => {
+  it("does not infer workspace reuse for agent-created root issues from the current run", async () => {
     const app = await createApp(
       ownerActor(),
       createRunContextDb({
@@ -1185,6 +1185,37 @@ describe("agent issue mutation checkout ownership", () => {
       companyId,
       expect.objectContaining({
         title: "Follow-up in same worktree",
+      }),
+    );
+    expect(mockIssueService.create).toHaveBeenCalledWith(
+      companyId,
+      expect.not.objectContaining({
+        inheritExecutionWorkspaceFromIssueId: issueId,
+      }),
+    );
+  });
+
+  it("preserves explicit current-run workspace reuse intent on agent-created root issues", async () => {
+    const app = await createApp(
+      ownerActor(),
+      createRunContextDb({
+        issueId,
+        executionWorkspaceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      }),
+    );
+
+    const res = await request(app)
+      .post(`/api/companies/${companyId}/issues`)
+      .send({
+        title: "Explicit follow-up in same worktree",
+        inheritExecutionWorkspaceFromIssueId: issueId,
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(mockIssueService.create).toHaveBeenCalledWith(
+      companyId,
+      expect.objectContaining({
+        title: "Explicit follow-up in same worktree",
         inheritExecutionWorkspaceFromIssueId: issueId,
       }),
     );

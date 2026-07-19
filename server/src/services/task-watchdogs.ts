@@ -1246,7 +1246,9 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
         originId: input.sourceIssue.id,
         originFingerprint: input.classification.stopFingerprint,
         billingCode: input.sourceIssue.billingCode,
-        inheritExecutionWorkspaceFromIssueId: input.sourceIssue.id,
+        ...(input.sourceIssue.executionWorkspaceId
+          ? { inheritExecutionWorkspaceFromIssueId: input.sourceIssue.id }
+          : {}),
       })
       .catch(async (error: unknown) => {
         if (!isActiveTaskWatchdogUniqueConflict(error)) throw error;
